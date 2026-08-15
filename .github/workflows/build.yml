@@ -24,7 +24,6 @@ jobs:
 
       - name: 安装前端依赖
         run: npm install --cache ${{ runner.temp }}/npm-cache
-        working-directory: codex-switch-desktop
 
       - name: Linux 系统依赖
         if: matrix.platform == 'ubuntu-22.04'
@@ -37,7 +36,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: codex-switch-desktop
           tagName: v__VERSION__
           releaseName: "Codex Switch v__VERSION__"
           releaseBody: |
