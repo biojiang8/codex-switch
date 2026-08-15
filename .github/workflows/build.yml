@@ -19,6 +19,8 @@ jobs:
           - platform: ubuntu-22.04
             args: ""
     runs-on: ${{ matrix.platform }}
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
