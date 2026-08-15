@@ -30,6 +30,6 @@
     "category": "DeveloperTool",
     "shortDescription": "ChatGPT 官方 / API 一键切换 + 清缓存刷新",
     "longDescription": "Codex Switch 桌面版：首次启动向导式配置，一键切换 ChatGPT 官方账户与任意 API Provider，清缓存刷新会话列表。API Key 存 macOS 钥匙串。",
-    "icon": ["icons/icon.icns", "icons/icon.png"]
+    "icon": ["icons/icon.icns", "icons/icon.ico", "icons/icon.png"]
   }
 }
