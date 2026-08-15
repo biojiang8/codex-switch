@@ -1,0 +1,23 @@
+# 依赖
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# 密钥与本地配置（绝不提交）
+*.env
+.env
+.env.*
+!*.env.example
+*.pem
+*.key
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 图标源文件（生成物由 cargo tauri icon 管理）
+src-tauri/icons/icon-source.png
+
+# 截图占位
+screenshot.png

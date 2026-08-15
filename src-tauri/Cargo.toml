@@ -1,0 +1,35 @@
+[package]
+name = "codex-switch-desktop"
+version = "3.0.0"
+description = "Codex Switch — ChatGPT 官方账户 / 各种 API / 清缓存刷新"
+authors = ["biojiang8"]
+edition = "2021"
+
+[lib]
+name = "codex_switch_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml_edit = "0.22"
+rusqlite = { version = "0.32", features = ["bundled"] }
+dirs = "5"
+ureq = "2"
+
+# 跨平台密钥存储：
+#   macOS   → Apple Keychain（钥匙串）
+#   Windows → Windows Credential Manager（凭据管理器）
+#   Linux   → Secret Service（libsecret / gnome-keyring）
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service"] }
