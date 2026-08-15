@@ -58,8 +58,9 @@ pub fn restart_chatgpt(skip_restart: bool, steps: &mut Vec<String>) {
     }
 }
 
-/// 同步 SQLite threads 表的 model 字段（绝不改 model_provider）
-fn sync_threads_model(model: &str, steps: &mut Vec<String>) {
+/// 同步 SQLite threads 表的 model / model_provider 字段
+/// v4：段名随模式变化（官方="openai"内置，自定义="<pid>"），必须同步 model_provider
+fn sync_threads_model(model: &str, provider: &str, steps: &mut Vec<String>) {
     let db_path = state_db_path();
     if !db_path.exists() {
         return;
@@ -77,6 +78,12 @@ fn sync_threads_model(model: &str, steps: &mut Vec<String>) {
                 )
                 .unwrap_or(0);
             step(steps, format!("已同步 {updated} 条会话的 model → {model}"));
+            if !provider.is_empty() {
+                let updated_mp = conn
+                    .execute("UPDATE threads SET model_provider = ?1", [provider])
+                    .unwrap_or(0);
+                step(steps, format!("已同步 {updated_mp} 条会话的 model_provider → {provider}"));
+            }
         }
         Err(e) => {
             step(steps, format!("SQLite 同步跳过: {e}"));
@@ -249,8 +256,13 @@ pub fn switch_provider(pid: String, skip_restart: Option<bool>) -> Result<Switch
         &mut steps,
     )?;
 
-    // SQLite 同步
-    sync_threads_model(&provider.model, &mut steps);
+    // SQLite 同步（v4：model_provider 也同步，官方→openai，自定义→pid）
+    let provider_id = if provider.ptype == "official" {
+        "openai"
+    } else {
+        &target_pid
+    };
+    sync_threads_model(&provider.model, provider_id, &mut steps);
 
     // 重启 ChatGPT
     restart_chatgpt(skip_restart.unwrap_or(false), &mut steps);

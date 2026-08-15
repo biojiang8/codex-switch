@@ -1,24 +1,29 @@
-//! config.toml 编辑核心（移植 CLI v3.0 的 Python 逻辑）
-//! 使用 toml_edit 保留注释与格式，只做最小修改
+//! config.toml 编辑核心（v4 架构）
+//! v4 架构（2026-08-15，适配新版 ChatGPT 应用 26.810+）：
+//!   - 新版 Codex 将 `openai` 设为保留内置 provider ID，禁止自定义覆盖
+//!   - 因此不再有"镜像进 [model_providers.OpenAI] 活跃段"的架构
+//!   - 官方模式：顶层 model_provider = "openai"（内置），不写任何自定义段
+//!   - 自定义模式：顶层 model_provider = "<provider id>"，段名与 id 一致
+//!   - threads.model_provider 必须随切换同步（段名随模式变化）
 
 use crate::codex::Provider;
 use std::path::Path;
 use toml_edit::{DocumentMut, Item, Table, Value};
 
-/// 写入 Provider 段（并行常驻，不覆盖已有段）
-/// 注意：[model_providers.XXX] 是嵌套表，必须用 doc["model_providers"]["XXX"] 访问
-fn ensure_provider_section(doc: &mut DocumentMut, pid: &str, p: &Provider) {
-    let exists = doc
-        .get("model_providers")
-        .and_then(|i| i.as_table())
-        .map(|t| t.contains_key(pid))
-        .unwrap_or(false);
-    if exists {
-        return;
-    }
+fn value_str(s: &str) -> Item {
+    Item::Value(Value::from(s.to_string()))
+}
+fn value_bool(b: bool) -> Item {
+    Item::Value(Value::from(b))
+}
+
+/// 由 provider 生成段内容（不含段头）
+fn build_provider_table(pid: &str, p: &Provider) -> Table {
     let mut table = Table::new();
-    let name = if pid.eq_ignore_ascii_case("openai") {
+    let name = if p.ptype == "official" {
         "OpenAI".to_string()
+    } else if !p.display_name.is_empty() {
+        p.display_name.clone()
     } else {
         pid.to_string()
     };
@@ -39,100 +44,79 @@ fn ensure_provider_section(doc: &mut DocumentMut, pid: &str, p: &Provider) {
             table["api_key"] = value_str(&p.api_key);
         }
     }
-    // 确保 model_providers 表存在
+    table
+}
+
+/// 确保 model_providers 表存在
+fn ensure_mp_table(doc: &mut DocumentMut) {
     if doc.get("model_providers").is_none() {
         doc["model_providers"] = Item::Table(Table::new());
     }
-    if let Some(mp) = doc.get_mut("model_providers").and_then(|i| i.as_table_mut()) {
-        mp.insert(pid, Item::Table(table));
-    }
 }
 
-fn value_str(s: &str) -> Item {
-    Item::Value(Value::from(s.to_string()))
-}
-fn value_bool(b: bool) -> Item {
-    Item::Value(Value::from(b))
+/// 获取 model_providers 表（只读）
+fn mp_table(doc: &DocumentMut) -> Option<&Table> {
+    doc.get("model_providers").and_then(|i| i.as_table())
 }
 
-/// 把目标 provider 镜像进活跃段 [model_providers.OpenAI]
-/// （清掉 base_url/api_key/认证字段后重写，保留其他未知字段）
-fn mirror_into_active_section(doc: &mut DocumentMut, p: &Provider) {
-    // 活跃段：model_providers.OpenAI（嵌套表）
-    let mut table = doc
-        .get("model_providers")
-        .and_then(|i| i.as_table())
-        .and_then(|t| t.get("OpenAI"))
-        .and_then(|i| i.as_table())
-        .cloned()
+/// 删除保留段 model_providers.openai（大小写不敏感）
+fn remove_reserved_sections(doc: &mut DocumentMut) {
+    ensure_mp_table(doc);
+    let keys: Vec<String> = mp_table(doc)
+        .map(|t| {
+            t.iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("openai"))
+                .map(|(k, _)| k.to_string())
+                .collect()
+        })
         .unwrap_or_default();
-
-    // 删除需要重写的字段
-    for key in [
-        "base_url",
-        "api_key",
-        "requires_openai_auth",
-        "experimental_bearer_token",
-        "env_key",
-        "env_key_instructions",
-    ] {
-        table.remove(key);
-    }
-
-    table["name"] = value_str("OpenAI");
-    table["wire_api"] = value_str(if p.wire_api.is_empty() {
-        "responses"
-    } else {
-        &p.wire_api
-    });
-
-    if p.ptype == "official" {
-        table["requires_openai_auth"] = value_bool(true);
-    } else {
-        table["requires_openai_auth"] = value_bool(false);
-        if !p.base_url.is_empty() {
-            table["base_url"] = value_str(&p.base_url);
+    if let Some(mp) = doc.get_mut("model_providers").and_then(|i| i.as_table_mut()) {
+        for k in keys {
+            mp.remove(&k);
         }
-        if !p.api_key.is_empty() {
+    }
+}
+
+/// 设置/覆盖自定义 provider 段
+fn upsert_provider_section(doc: &mut DocumentMut, pid: &str, p: &Provider) {
+    ensure_mp_table(doc);
+    if let Some(mp) = doc.get_mut("model_providers").and_then(|i| i.as_table_mut()) {
+        mp.insert(pid, Item::Table(build_provider_table(pid, p)));
+    }
+}
+
+/// [auth] 段：官方清 key，自定义写 key
+fn update_auth_section(doc: &mut DocumentMut, p: &Provider) {
+    if p.ptype == "official" {
+        if let Some(table) = doc.get_mut("auth").and_then(|i| i.as_table_mut()) {
+            table.remove("api_key");
+        }
+    } else if !p.api_key.is_empty() {
+        if let Some(table) = doc.get_mut("auth").and_then(|i| i.as_table_mut()) {
             table["api_key"] = value_str(&p.api_key);
         }
     }
-
-    if doc.get("model_providers").is_none() {
-        doc["model_providers"] = Item::Table(Table::new());
-    }
-    if let Some(mp) = doc.get_mut("model_providers").and_then(|i| i.as_table_mut()) {
-        mp.insert("OpenAI", Item::Table(table));
-    }
 }
 
-/// 顶层字段管理：model / review_model / model_provider / model_catalog_json
-fn update_top_level(doc: &mut DocumentMut, p: &Provider) {
-    doc["model"] = value_str(if p.model.is_empty() { "gpt-5.5" } else { &p.model });
-    doc["review_model"] = value_str(if p.model.is_empty() { "gpt-5.5" } else { &p.model });
-    doc["model_provider"] = value_str("OpenAI");
-    if !p.catalog_json.is_empty() {
+/// 顶层字段：model / review_model / model_provider / model_catalog_json
+fn update_top_level(doc: &mut DocumentMut, p: &Provider, pid: &str) {
+    let model = if p.model.is_empty() { "gpt-5.5" } else { &p.model };
+    doc["model"] = value_str(model);
+    doc["review_model"] = value_str(model);
+    let provider_id = if p.ptype == "official" {
+        "openai" // 内置保留 ID（小写）
+    } else {
+        pid
+    };
+    doc["model_provider"] = value_str(provider_id);
+    if p.ptype != "official" && !p.catalog_json.is_empty() {
         doc["model_catalog_json"] = value_str(&p.catalog_json);
     } else {
         doc.remove("model_catalog_json");
     }
 }
 
-/// [auth] 段：官方模式移除残留 api_key，custom 模式写入
-fn update_auth_section(doc: &mut DocumentMut, p: &Provider) {
-    let auth_key = "auth";
-    if p.ptype == "official" {
-        if let Some(table) = doc.get_mut(auth_key).and_then(|i| i.as_table_mut()) {
-            table.remove("api_key");
-        }
-    } else if !p.api_key.is_empty() {
-        if let Some(table) = doc.get_mut(auth_key).and_then(|i| i.as_table_mut()) {
-            table["api_key"] = value_str(&p.api_key);
-        }
-    }
-}
-
-/// 执行完整切换：返回 (是否修改了文件, 新 model)
+/// 执行完整切换（v4）
 pub fn apply_switch(
     config_toml: &Path,
     pid: &str,
@@ -145,24 +129,39 @@ pub fn apply_switch(
         .parse::<DocumentMut>()
         .map_err(|e| format!("解析 config.toml 失败: {e}"))?;
 
-    // 1. 确保所有 provider 常驻段存在（并行保存）
-    for (other_pid, other_p) in all_providers {
-        ensure_provider_section(&mut doc, other_pid, other_p);
+    // 1. 删除保留段（任何大小写的 openai 段）
+    remove_reserved_sections(&mut doc);
+
+    if p.ptype == "official" {
+        // 官方模式：内置 provider，不写自定义段
+        update_auth_section(&mut doc, p);
+        update_top_level(&mut doc, p, pid);
+    } else {
+        // 自定义模式：段名 = provider id
+        upsert_provider_section(&mut doc, pid, p);
+        // 其他 provider 段保持常驻（并行保存）
+        for (other_pid, other_p) in all_providers {
+            if other_pid != pid && other_p.ptype != "official" {
+                upsert_provider_section(&mut doc, other_pid, other_p);
+            }
+        }
+        update_auth_section(&mut doc, p);
+        update_top_level(&mut doc, p, pid);
     }
-
-    // 2. 镜像目标 provider 进活跃段
-    mirror_into_active_section(&mut doc, p);
-
-    // 3. 顶层字段
-    update_top_level(&mut doc, p);
-
-    // 4. [auth] 段
-    update_auth_section(&mut doc, p);
 
     std::fs::write(config_toml, doc.to_string())
         .map_err(|e| format!("写入 config.toml 失败: {e}"))?;
-    let _ = pid;
     Ok(())
+}
+
+/// 读取当前顶层 model_provider
+pub fn read_current_provider(config_toml: &Path) -> String {
+    let content = std::fs::read_to_string(config_toml).unwrap_or_default();
+    let doc = content.parse::<DocumentMut>().unwrap_or_default();
+    doc.get("model_provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// 读取当前顶层 model
@@ -175,13 +174,16 @@ pub fn read_current_model(config_toml: &Path) -> String {
         .to_string()
 }
 
-/// 读取当前活跃段 base_url（判断官方/自定义模式）
+/// 读取当前 provider 段的 base_url（判断官方/自定义模式）
 pub fn read_active_base_url(config_toml: &Path) -> String {
     let content = std::fs::read_to_string(config_toml).unwrap_or_default();
     let doc = content.parse::<DocumentMut>().unwrap_or_default();
-    doc.get("model_providers")
-        .and_then(|i| i.as_table())
-        .and_then(|t| t.get("OpenAI"))
+    let provider = read_current_provider(config_toml);
+    if provider.is_empty() || provider.eq_ignore_ascii_case("openai") {
+        return String::new();
+    }
+    mp_table(&doc)
+        .and_then(|t| t.get(&provider))
         .and_then(|i| i.as_table())
         .and_then(|t| t.get("base_url"))
         .and_then(|v| v.as_str())
@@ -206,7 +208,7 @@ mod tests {
     use std::fs;
 
     fn temp_config(name: &str, content: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("cs-test-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cs-v4test-{}-{name}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         fs::write(&path, content).unwrap();
@@ -230,63 +232,56 @@ mod tests {
     }
 
     #[test]
-    fn switch_to_custom_mirrors_active_section() {
-        let path = temp_config("custom",
-            "model_provider = \"OpenAI\"\nmodel = \"gpt-5.5\"\n\n[model_providers.OpenAI]\nname = \"OpenAI\"\nrequires_openai_auth = true\n\n[model_providers.myapi]\nname = \"myapi\"\n\n[auth]\n",
-        );
-        let myapi = provider("myapi", "custom", "https://myapi.com", "sk-test", "gpt-5.6-sol", "/tmp/catalog.json");
+    fn switch_to_custom_v4() {
+        let path = temp_config("custom", "model_provider = \"OpenAI\"\nmodel = \"gpt-5.5\"\n\n[model_providers.OpenAI]\nname = \"OpenAI\"\nrequires_openai_auth = true\n\n[model_providers.myapi]\nname = \"myapi\"\n\n[auth]\n");
+        let myapi = provider("myapi", "custom", "https://myapi.example.com", "sk-test", "gpt-5.6-sol", "/tmp/catalog.json");
         apply_switch(&path, "myapi", &myapi.1, &[myapi.clone()]).unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
-        eprintln!("=== 切换后内容 ===\n{content}");
+        assert!(content.contains("model_provider = \"myapi\""), "model_provider 未指向段名");
         assert!(content.contains("model = \"gpt-5.6-sol\""), "model 未更新");
-        assert!(content.contains("model_provider = \"OpenAI\""), "model_provider 被改");
         assert!(content.contains("model_catalog_json = \"/tmp/catalog.json\""), "catalog 未写入");
-        assert!(content.contains("base_url = \"https://myapi.com\""), "base_url 未写入活跃段");
-        assert!(content.contains("requires_openai_auth = false"), "认证标记未更新");
-        assert!(content.contains("api_key = \"sk-test\""), "api_key 未写入活跃段");
-        // [auth] 段也应有 key
+        assert!(!content.contains("model_providers.OpenAI"), "保留段 OpenAI 未删除");
+        assert!(!content.contains("model_providers.openai"), "保留段 openai 未删除");
+        assert!(content.contains("[model_providers.myapi]"), "自定义段缺失");
+        assert!(content.contains("base_url = \"https://myapi.example.com\""), "base_url 未写入");
+        assert!(content.contains("api_key = \"sk-test\""), "api_key 未写入");
         let auth_idx = content.find("[auth]").unwrap();
-        assert!(content[auth_idx..].contains("api_key = \"sk-test\""), "[auth] 段 key 未写入");
-        // 并行段保留
-        assert!(content.contains("[model_providers.myapi]"), "并行段丢失");
+        assert!(content[auth_idx..].contains("api_key = \"sk-test\""), "[auth] key 未写入");
         fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]
-    fn switch_to_official_cleans_residue() {
-        let path = temp_config("official",
-            "model_provider = \"OpenAI\"\nmodel = \"gpt-5.6-sol\"\nmodel_catalog_json = \"/tmp/myapi-catalog.json\"\n\n[model_providers.OpenAI]\nname = \"OpenAI\"\nbase_url = \"https://myapi.com\"\nrequires_openai_auth = false\napi_key = \"sk-test\"\n\n[auth]\napi_key = \"sk-test\"\n",
-        );
+    fn switch_to_official_v4() {
+        let path = temp_config("official", "model_provider = \"myapi\"\nmodel = \"gpt-5.6-sol\"\nmodel_catalog_json = \"/tmp/catalog.json\"\n\n[model_providers.myapi]\nname = \"myapi\"\nbase_url = \"https://myapi.example.com\"\napi_key = \"sk-test\"\n\n[model_providers.openai]\nname = \"OpenAI\"\n\n[auth]\napi_key = \"sk-test\"\n");
         let openai = provider("openai", "official", "", "", "gpt-5.5", "");
         apply_switch(&path, "openai", &openai.1, &[openai.clone()]).unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
-        eprintln!("=== official 切换后 ===\n{content}");
+        assert!(content.contains("model_provider = \"openai\""), "官方模式 model_provider 应为内置 openai");
         assert!(content.contains("model = \"gpt-5.5\""), "model 未更新");
-        assert!(!content.contains("model_catalog_json"), "残留 catalog 未清除");
-        assert!(!content.contains("base_url"), "残留 base_url 未清除");
-        assert!(content.contains("requires_openai_auth = true"), "官方认证标记未写入");
+        assert!(!content.contains("[model_providers.openai]"), "保留段 openai 未删除");
+        assert!(!content.contains("[model_providers.OpenAI]"), "保留段 OpenAI 未删除");
+        assert!(!content.contains("model_catalog_json"), "官方模式 catalog 未清除");
         let auth_idx = content.find("[auth]").unwrap();
-        assert!(!content[auth_idx..].contains("api_key"), "[auth] 段残留 key 未清除");
+        assert!(!content[auth_idx..].contains("api_key"), "[auth] 残留 key 未清除");
+        assert!(content.contains("[model_providers.myapi]"), "自定义常驻段丢失");
         fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]
-    fn parallel_sections_preserved() {
-        let path = temp_config("parallel",
-            "model_provider = \"OpenAI\"\nmodel = \"gpt-5.5\"\n\n[model_providers.OpenAI]\nname = \"OpenAI\"\nrequires_openai_auth = true\n\n[auth]\n",
-        );
-        let myapi = provider("myapi", "custom", "https://myapi.com", "sk-test", "gpt-5.6-sol", "");
+    fn parallel_sections_v4() {
+        let path = temp_config("parallel", "model_provider = \"openai\"\nmodel = \"gpt-5.5\"\n\n[auth]\n");
+        let myapi = provider("myapi", "custom", "https://myapi.example.com", "sk-test", "gpt-5.6-sol", "");
         let openai = provider("openai", "official", "", "", "gpt-5.5", "");
-        // 切 myapi（无 myapi 段 → 自动创建）
         apply_switch(&path, "myapi", &myapi.1, &[myapi.clone(), openai.clone()]).unwrap();
         let c1 = fs::read_to_string(&path).unwrap();
-        assert!(c1.contains("[model_providers.myapi]"), "常驻段未创建");
-        // 切回 openai → myapi 段仍在
+        assert!(c1.contains("[model_providers.myapi]"), "自定义段未创建");
+        assert!(c1.contains("model_provider = \"myapi\""), "顶层未指向段名");
         apply_switch(&path, "openai", &openai.1, &[myapi.clone(), openai.clone()]).unwrap();
         let c2 = fs::read_to_string(&path).unwrap();
-        assert!(c2.contains("[model_providers.myapi]"), "切回后常驻段丢失");
+        assert!(c2.contains("[model_providers.myapi]"), "切回官方后常驻段丢失");
+        assert!(c2.contains("model_provider = \"openai\""), "官方模式顶层未指向内置 openai");
         fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }
