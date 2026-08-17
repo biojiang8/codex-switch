@@ -1,6 +1,6 @@
 [package]
 name = "codex-switch-desktop"
-version = "3.1.0"
+version = "3.1.1"
 description = "Codex Switch — ChatGPT 官方账户 / 各种 API / 清缓存刷新"
 authors = ["biojiang8"]
 edition = "2021"

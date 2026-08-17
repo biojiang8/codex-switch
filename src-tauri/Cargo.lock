@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "codex-switch-desktop"
-version = "3.0.0"
+version = "3.1.1"
 dependencies = [
  "dirs 5.0.1",
  "keyring",

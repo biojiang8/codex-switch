@@ -41,7 +41,8 @@ fn build_provider_table(pid: &str, p: &Provider) -> Table {
             table["base_url"] = value_str(&p.base_url);
         }
         if !p.api_key.is_empty() {
-            table["api_key"] = value_str(&p.api_key);
+            // 新版 Codex 只认 experimental_bearer_token（api_key 字段已废弃）
+            table["experimental_bearer_token"] = value_str(&p.api_key);
         }
     }
     table
@@ -245,7 +246,7 @@ mod tests {
         assert!(!content.contains("model_providers.openai"), "保留段 openai 未删除");
         assert!(content.contains("[model_providers.myapi]"), "自定义段缺失");
         assert!(content.contains("base_url = \"https://myapi.example.com\""), "base_url 未写入");
-        assert!(content.contains("api_key = \"sk-test\""), "api_key 未写入");
+        assert!(content.contains("experimental_bearer_token = \"sk-test\""), "bearer token 未写入");
         let auth_idx = content.find("[auth]").unwrap();
         assert!(content[auth_idx..].contains("api_key = \"sk-test\""), "[auth] key 未写入");
         fs::remove_dir_all(path.parent().unwrap()).ok();
@@ -253,7 +254,7 @@ mod tests {
 
     #[test]
     fn switch_to_official_v4() {
-        let path = temp_config("official", "model_provider = \"myapi\"\nmodel = \"gpt-5.6-sol\"\nmodel_catalog_json = \"/tmp/catalog.json\"\n\n[model_providers.myapi]\nname = \"myapi\"\nbase_url = \"https://myapi.example.com\"\napi_key = \"sk-test\"\n\n[model_providers.openai]\nname = \"OpenAI\"\n\n[auth]\napi_key = \"sk-test\"\n");
+        let path = temp_config("official", "model_provider = \"myapi\"\nmodel = \"gpt-5.6-sol\"\nmodel_catalog_json = \"/tmp/catalog.json\"\n\n[model_providers.myapi]\nname = \"myapi\"\nbase_url = \"https://myapi.example.com\"\nexperimental_bearer_token = \"sk-test\"\n\n[model_providers.openai]\nname = \"OpenAI\"\n\n[auth]\napi_key = \"sk-test\"\n");
         let openai = provider("openai", "official", "", "", "gpt-5.5", "");
         apply_switch(&path, "openai", &openai.1, &[openai.clone()]).unwrap();
 
